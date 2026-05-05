@@ -1,45 +1,71 @@
-# Monzo Proxy
+# Monzo → Wealthfolio Addon
 
-A lightweight FastAPI backend proxy that handles Monzo OAuth and proxies authenticated API
-requests. Required by the Wealthfolio Monzo Addon.
+A production-grade bridge between Monzo Bank and the Wealthfolio investment tracker.
+Automates the import of cash transactions into a Wealthfolio cash account.
 
-## Setup
+## Structure
 
-1. Register a **confidential** OAuth client at https://developers.monzo.com
-2. Set `Redirect URI` to `http://localhost:8000/callback`
-3. Copy `.env.example` to `.env` and fill in your credentials:
+```
+/
+├── main.py          # FastAPI proxy (handles OAuth + proxies Monzo API calls)
+├── requirements.txt
+├── .env.example
+└── addon/           # Wealthfolio TypeScript addon
+    ├── manifest.json
+    ├── package.json
+    ├── vite.config.ts
+    └── src/
+        ├── addon.tsx        # Addon entry point
+        ├── types.ts
+        ├── lib/
+        │   ├── proxy-client.ts  # HTTP client for the proxy
+        │   └── mapper.ts        # Monzo tx → ActivityImport
+        ├── hooks/
+        │   ├── use-tokens.ts    # OS-keyring token storage via ctx.api.secrets
+        │   └── use-sync.ts      # Full sync orchestration
+        └── pages/
+            ├── settings-page.tsx  # Proxy URL + OAuth + account mapping
+            └── dashboard-page.tsx # Sync status + Sync Now button
+```
+
+## How It Works
+
+1. **Proxy** (`main.py`) runs locally and holds `MONZO_CLIENT_SECRET`
+2. **Addon** authenticates via OAuth: opens Monzo auth URL, polls `/token-status`
+3. **Tokens** stored in Wealthfolio’s OS keyring via `ctx.api.secrets` — never on disk
+4. **Sync**: fetches settled (non-pending, non-pot) transactions → deduplicates via `checkImport` → imports
+
+## Quick Start
+
+### 1. Proxy
 
 ```bash
 cp .env.example .env
-```
-
-4. Install dependencies and start:
-
-```bash
+# Fill in MONZO_CLIENT_ID and MONZO_CLIENT_SECRET from https://developers.monzo.com
 pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-## Endpoints
+### 2. Addon
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /health | Health check |
-| GET | /auth | Generate Monzo OAuth URL + state |
-| GET | /callback | OAuth callback — exchanges code for tokens |
-| GET | /token-status?state= | Poll for tokens after OAuth |
-| POST | /refresh | Refresh access token |
-| GET | /accounts | Proxy to Monzo `/accounts` |
-| GET | /transactions | Proxy to Monzo `/transactions` |
+```bash
+cd addon
+npm install
+npm run build
+# Load dist/addon.js + manifest.json in Wealthfolio
+```
+
+### 3. First Use
+
+1. In Wealthfolio, open **Monzo Sync → Settings**
+2. Enter proxy URL (`http://localhost:8000`) and save
+3. Click **Connect Monzo** — authenticate in the browser window
+4. Map each Monzo account to a Wealthfolio cash account
+5. Go to **Monzo Sync** and click **Sync Now**
 
 ## Security
 
-Tokens are **never stored** by the proxy. They live in memory only between the OAuth callback
-and the addon's first `/token-status` poll (seconds). After that, the Wealthfolio addon stores
-them in the OS keyring via the encrypted secrets API.
-
-## Development
-
-```bash
-uvicorn main:app --reload
-```
+- `MONZO_CLIENT_SECRET` lives only in the proxy `.env` — never sent to the browser
+- Access/refresh tokens stored in the OS keyring via Wealthfolio’s encrypted secrets API
+- Tokens are never written to disk or localStorage
+- Proxy is stateless: tokens pass through per-request only
