@@ -44,7 +44,6 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
   const [autoCreateStatus, setAutoCreateStatus] = useState<string | null>(null);
   const [resetStatus, setResetStatus] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const autoCreateRanRef = useRef(false);
 
   const { data: savedProxyUrl } = useQuery({
     queryKey: ["monzo_proxy_url"],
@@ -91,17 +90,19 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
     if (savedMapping) setMapping(savedMapping);
   }, [savedMapping]);
 
-  // Auto-create Wealthfolio accounts for Monzo accounts that have no mapping
+  // Auto-create Wealthfolio accounts for Monzo accounts that have no mapping or stale mappings
   useEffect(() => {
-    if (autoCreateRanRef.current) return;
     if (!monzoAccountsData?.accounts?.length || !wfAccounts || !savedMapping) return;
 
-    const unmapped = monzoAccountsData.accounts.filter(
-      (acc) => !savedMapping[acc.id],
-    );
-    if (unmapped.length === 0) return;
+    const wfAccountIds = new Set(wfAccounts.map((a) => a.id));
 
-    autoCreateRanRef.current = true;
+    // Find Monzo accounts that are either unmapped or have mappings pointing to deleted accounts
+    const unmapped = monzoAccountsData.accounts.filter((acc) => {
+      const mappedId = savedMapping[acc.id];
+      return !mappedId || !wfAccountIds.has(mappedId);
+    });
+
+    if (unmapped.length === 0) return;
 
     (async () => {
       const newMapping: AccountMapping = { ...savedMapping };
@@ -134,12 +135,14 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
         }
       }
 
-      if (created.length > 0) {
+      // Save if we created new accounts or cleaned up stale mappings
+      if (created.length > 0 || JSON.stringify(newMapping) !== JSON.stringify(savedMapping)) {
         await ctx.api.secrets.set(MAPPING_KEY, JSON.stringify(newMapping));
         setMapping(newMapping);
         queryClient.invalidateQueries({ queryKey: ["monzo_mapping"] });
-        queryClient.invalidateQueries({ queryKey: ["wf_accounts"] });
-        setAutoCreateStatus(`Auto-created: ${created.join(", ")}`);
+        if (created.length > 0) {
+          setAutoCreateStatus(`Auto-created: ${created.join(", ")}`);
+        }
       }
     })();
   }, [monzoAccountsData, wfAccounts, savedMapping]);
@@ -203,7 +206,6 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
 
   async function disconnect() {
     await clearTokens(ctx);
-    autoCreateRanRef.current = false;
     refetchTokens();
     queryClient.invalidateQueries({ queryKey: ["monzo_accounts"] });
   }
