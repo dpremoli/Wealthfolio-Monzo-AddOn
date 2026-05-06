@@ -2,6 +2,7 @@ import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import urlencode
 
 import httpx
 from dotenv import load_dotenv
@@ -61,13 +62,13 @@ async def health():
 @app.get("/auth")
 async def get_auth_url():
     state = secrets.token_urlsafe(32)
-    url = (
-        f"{MONZO_AUTH_BASE}"
-        f"?client_id={CLIENT_ID}"
-        f"&redirect_uri={REDIRECT_URI}"
-        f"&response_type=code"
-        f"&state={state}"
-    )
+    params = {
+        "client_id": CLIENT_ID,
+        "redirect_uri": REDIRECT_URI,
+        "response_type": "code",
+        "state": state,
+    }
+    url = f"{MONZO_AUTH_BASE}?{urlencode(params)}"
     return {"url": url, "state": state}
 
 
