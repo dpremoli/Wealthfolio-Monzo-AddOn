@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Automatically sync transactions from your Monzo bank account into Wealthfolio",
   "author": "Wealthfolio",
-  "main": "dist/addon.js",
+  "main": "addon.js",
   "sdkVersion": "3.3.0",
   "enabled": true,
   "permissions": [
