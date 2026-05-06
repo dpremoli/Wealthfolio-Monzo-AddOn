@@ -1,88 +1,103 @@
-import { useQuery } from "@tanstack/react-query";
-import type { AddonContext } from "@wealthfolio/addon-sdk";
-import {
-  Badge,
-  Button,
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@wealthfolio/ui";
-import React from "react";
-import { useSync } from "../hooks/use-sync";
-import { getTokens } from "../hooks/use-tokens";
+import { useEffect, useState } from "react";
+import { useAddonContext } from "@wealthfolio/addon-sdk";
+import { Button } from "@wealthfolio/ui";
+import { useSync } from "@/hooks/use-sync";
+import { useTokens } from "@/hooks/use-tokens";
+import { SyncResult } from "@/types";
 
-const LAST_SYNC_KEY = "monzo_last_sync";
+export function DashboardPage() {
+  const ctx = useAddonContext();
+  const { sync, getLastSync } = useSync();
+  const { getTokens } = useTokens();
 
-export default function DashboardPage({ ctx }: { ctx: AddonContext }) {
-  const { isSyncing, lastResult, error, sync } = useSync(ctx);
+  const [syncing, setSyncing] = useState(false);
+  const [lastSync, setLastSync] = useState<string | null>(null);
+  const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [proxyUrl, setProxyUrl] = useState<string>("");
 
-  const { data: tokens } = useQuery({
-    queryKey: ["monzo_tokens"],
-    queryFn: () => getTokens(ctx),
-  });
+  useEffect(() => {
+    const load = async () => {
+      try {
+        const stored = await ctx.api.secrets.get("monzo_proxy_url");
+        if (stored) setProxyUrl(stored);
 
-  const { data: lastSyncIso } = useQuery({
-    queryKey: ["monzo_last_sync"],
-    queryFn: async () => {
-      const raw = await ctx.api.secrets.get(LAST_SYNC_KEY);
-      return raw ? (JSON.parse(raw) as string) : null;
-    },
-  });
+        const last = await getLastSync();
+        if (last) setLastSync(last);
+      } catch {}
+    };
+    load();
+  }, [ctx.api.secrets, getLastSync]);
 
-  const lastSyncDisplay = lastSyncIso ? new Date(lastSyncIso).toLocaleString() : "Never";
+  const handleSync = async () => {
+    if (!proxyUrl) {
+      setError("Proxy URL not configured");
+      return;
+    }
+
+    const tokens = await getTokens();
+    if (!tokens) {
+      setError("Not authenticated. Please go to Settings to connect.");
+      return;
+    }
+
+    setSyncing(true);
+    setError(null);
+
+    try {
+      const result = await sync(proxyUrl);
+      setSyncResult(result);
+      const now = new Date().toISOString();
+      setLastSync(now);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Sync failed");
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   return (
-    <div className="space-y-6 p-6 max-w-2xl">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold">Monzo Sync</h1>
-          <p className="text-muted-foreground mt-1">Sync Monzo transactions into Wealthfolio.</p>
-        </div>
-        <Button onClick={sync} disabled={isSyncing || !tokens} size="lg">
-          {isSyncing ? "Syncing…" : "Sync Now"}
+    <div className="p-6 space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold mb-4">Monzo Sync</h1>
+
+        {lastSync && (
+          <p className="text-sm text-gray-600 mb-4">
+            Last sync: {new Date(lastSync).toLocaleString()}
+          </p>
+        )}
+
+        <Button onClick={handleSync} disabled={syncing}>
+          {syncing ? "Syncing..." : "Sync Now"}
         </Button>
       </div>
 
-      {!tokens && (
-        <Card>
-          <CardContent className="pt-6">
-            <p className="text-sm text-muted-foreground">
-              Not connected to Monzo.{" "}
-              <button
-                className="underline"
-                onClick={() => ctx.api.navigation.navigate("/addons/monzo/settings")}
-              >
-                Open Settings
-              </button>{" "}
-              to connect.
-            </p>
-          </CardContent>
-        </Card>
+      {syncResult && (
+        <div className="grid grid-cols-3 gap-4">
+          <div className="bg-blue-50 p-4 rounded">
+            <div className="text-2xl font-bold text-blue-600">
+              {syncResult.imported}
+            </div>
+            <div className="text-sm text-gray-600">Imported</div>
+          </div>
+          <div className="bg-yellow-50 p-4 rounded">
+            <div className="text-2xl font-bold text-yellow-600">
+              {syncResult.skipped}
+            </div>
+            <div className="text-sm text-gray-600">Skipped</div>
+          </div>
+          <div className="bg-purple-50 p-4 rounded">
+            <div className="text-2xl font-bold text-purple-600">
+              {syncResult.duplicates}
+            </div>
+            <div className="text-sm text-gray-600">Duplicates</div>
+          </div>
+        </div>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Status</CardTitle>
-          <CardDescription>Last sync: {lastSyncDisplay}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          {isSyncing && (
-            <p className="text-sm text-muted-foreground animate-pulse">Syncing transactions…</p>
-          )}
-          {error && <p className="text-sm text-destructive">{error}</p>}
-          {lastResult && !isSyncing && (
-            <div className="flex flex-wrap gap-2">
-              <Badge variant="outline">{lastResult.imported} imported</Badge>
-              <Badge variant="outline">{lastResult.duplicates} duplicates skipped</Badge>
-              {lastResult.skipped > 0 && (
-                <Badge variant="outline">{lastResult.skipped} skipped</Badge>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      {error && (
+        <div className="bg-red-50 text-red-600 p-4 rounded">{error}</div>
+      )}
     </div>
   );
 }

@@ -1,27 +1,44 @@
-import type { AddonContext } from "@wealthfolio/addon-sdk";
-import type { MonzoTokens } from "../types";
+import { useCallback } from "react";
+import { useAddonContext } from "@wealthfolio/addon-sdk";
+import { MonzoTokens } from "@/types";
 
-const TOKENS_KEY = "monzo_tokens";
+const STORAGE_KEY = "monzo_tokens";
 
-export async function getTokens(ctx: AddonContext): Promise<MonzoTokens | null> {
-  const raw = await ctx.api.secrets.get(TOKENS_KEY);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as MonzoTokens;
-  } catch {
-    return null;
-  }
-}
+export function useTokens() {
+  const ctx = useAddonContext();
 
-export async function setTokens(ctx: AddonContext, tokens: MonzoTokens): Promise<void> {
-  await ctx.api.secrets.set(TOKENS_KEY, JSON.stringify(tokens));
-}
+  const getTokens = useCallback(async (): Promise<MonzoTokens | null> => {
+    try {
+      const stored = await ctx.api.secrets.get(STORAGE_KEY);
+      if (!stored) return null;
+      return JSON.parse(stored);
+    } catch {
+      return null;
+    }
+  }, [ctx.api.secrets]);
 
-export async function clearTokens(ctx: AddonContext): Promise<void> {
-  await ctx.api.secrets.delete(TOKENS_KEY);
-}
+  const setTokens = useCallback(
+    async (tokens: MonzoTokens) => {
+      await ctx.api.secrets.set(STORAGE_KEY, JSON.stringify(tokens));
+    },
+    [ctx.api.secrets]
+  );
 
-export function isTokenExpired(tokens: MonzoTokens): boolean {
-  // 5-minute buffer before 6-hour Monzo token expiry
-  return Date.now() > tokens.expires_at - 300_000;
+  const clearTokens = useCallback(async () => {
+    await ctx.api.secrets.delete(STORAGE_KEY);
+  }, [ctx.api.secrets]);
+
+  const isTokenExpired = useCallback((tokens: MonzoTokens | null): boolean => {
+    if (!tokens) return true;
+    const expiresAt = tokens.expires_at;
+    const buffer = 5 * 60 * 1000;
+    return Date.now() > expiresAt - buffer;
+  }, []);
+
+  return {
+    getTokens,
+    setTokens,
+    clearTokens,
+    isTokenExpired,
+  };
 }

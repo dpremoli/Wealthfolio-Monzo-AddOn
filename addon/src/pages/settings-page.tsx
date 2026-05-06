@@ -1,262 +1,170 @@
-import {
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
-import type { AddonContext } from "@wealthfolio/addon-sdk";
-import {
-  Badge,
-  Button,
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-  Input,
-  Label,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-  Separator,
-} from "@wealthfolio/ui";
-import React, { useEffect, useRef, useState } from "react";
-import { clearTokens, getTokens, setTokens } from "../hooks/use-tokens";
-import { MonzoProxyClient } from "../lib/proxy-client";
-import type { AccountMapping } from "../types";
+import { useEffect, useState } from "react";
+import { useAddonContext } from "@wealthfolio/addon-sdk";
+import { Button, Input, Select } from "@wealthfolio/ui";
+import { MonzoProxyClient } from "@/lib/proxy-client";
+import { MonzoAccount } from "@/types";
+import { useTokens } from "@/hooks/use-tokens";
+import { useSync } from "@/hooks/use-sync";
 
-const PROXY_URL_KEY = "monzo_proxy_url";
-const MAPPING_KEY = "monzo_account_mapping";
+export function SettingsPage() {
+  const ctx = useAddonContext();
+  const { getTokens, setTokens } = useTokens();
+  const { getAccountMapping, setAccountMapping } = useSync();
 
-export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
-  const queryClient = useQueryClient();
-  const [proxyUrl, setProxyUrl] = useState("");
-  const [isSavingProxy, setIsSavingProxy] = useState(false);
-  const [isConnecting, setIsConnecting] = useState(false);
-  const [connectError, setConnectError] = useState<string | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const { data: savedProxyUrl } = useQuery({
-    queryKey: ["monzo_proxy_url"],
-    queryFn: () => ctx.api.secrets.get(PROXY_URL_KEY),
-  });
+  const [proxyUrl, setProxyUrl] = useState<string>("");
+  const [monzoAccounts, setMonzoAccounts] = useState<MonzoAccount[]>([]);
+  const [wealthfolioAccounts, setWealthfolioAccounts] = useState<
+    Array<{ id: string; name: string }>
+  >([]);
+  const [mapping, setMapping] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(false);
+  const [authInProgress, setAuthInProgress] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (savedProxyUrl) setProxyUrl(savedProxyUrl);
-  }, [savedProxyUrl]);
-
-  const { data: tokens, refetch: refetchTokens } = useQuery({
-    queryKey: ["monzo_tokens"],
-    queryFn: () => getTokens(ctx),
-  });
-
-  const { data: monzoAccountsData } = useQuery({
-    queryKey: ["monzo_accounts"],
-    queryFn: async () => {
-      const t = await getTokens(ctx);
-      if (!t) return null;
-      const url = await ctx.api.secrets.get(PROXY_URL_KEY);
-      if (!url) return null;
-      return new MonzoProxyClient(url).getAccounts(t.access_token);
-    },
-    enabled: !!tokens,
-  });
-
-  const { data: wfAccounts = [] } = useQuery({
-    queryKey: ["wf_accounts"],
-    queryFn: () => ctx.api.accounts.getAll(),
-  });
-
-  const { data: savedMapping } = useQuery({
-    queryKey: ["monzo_mapping"],
-    queryFn: async () => {
-      const raw = await ctx.api.secrets.get(MAPPING_KEY);
-      return raw ? (JSON.parse(raw) as AccountMapping) : ({} as AccountMapping);
-    },
-  });
-
-  const [mapping, setMapping] = useState<AccountMapping>({});
+    const loadProxyUrl = async () => {
+      try {
+        const stored = await ctx.api.secrets.get("monzo_proxy_url");
+        if (stored) setProxyUrl(stored);
+      } catch {}
+    };
+    loadProxyUrl();
+  }, [ctx.api.secrets]);
 
   useEffect(() => {
-    if (savedMapping) setMapping(savedMapping);
-  }, [savedMapping]);
+    const loadAccounts = async () => {
+      try {
+        const accounts = await ctx.api.accounts.getAll();
+        setWealthfolioAccounts(
+          accounts.map((a) => ({ id: a.id, name: a.name || a.id }))
+        );
+      } catch {}
+    };
+    loadAccounts();
+  }, [ctx.api.accounts]);
 
-  const saveMappingMutation = useMutation({
-    mutationFn: (m: AccountMapping) =>
-      ctx.api.secrets.set(MAPPING_KEY, JSON.stringify(m)),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["monzo_mapping"] }),
-  });
+  useEffect(() => {
+    const loadMapping = async () => {
+      const stored = await getAccountMapping();
+      setMapping(stored);
+    };
+    loadMapping();
+  }, [getAccountMapping]);
 
-  async function saveProxyUrl() {
-    setIsSavingProxy(true);
-    try {
-      await ctx.api.secrets.set(PROXY_URL_KEY, proxyUrl.trim());
-      queryClient.invalidateQueries({ queryKey: ["monzo_proxy_url"] });
-    } finally {
-      setIsSavingProxy(false);
+  const saveProxyUrl = async () => {
+    await ctx.api.secrets.set("monzo_proxy_url", proxyUrl);
+  };
+
+  const handleConnect = async () => {
+    if (!proxyUrl) {
+      setError("Please enter proxy URL first");
+      return;
     }
-  }
 
-  async function connectMonzo() {
-    setIsConnecting(true);
-    setConnectError(null);
+    setAuthInProgress(true);
+    setError(null);
+
     try {
       const client = new MonzoProxyClient(proxyUrl);
       const { url, state } = await client.getAuthUrl();
-      window.open(url, "_blank", "width=600,height=700");
 
-      let attempts = 0;
-      const maxAttempts = 150; // ~5 minutes at 2s intervals
-      pollRef.current = setInterval(async () => {
-        attempts++;
-        try {
-          const result = await client.pollTokenStatus(state);
-          if (result.ready && result.tokens) {
-            clearInterval(pollRef.current!);
-            pollRef.current = null;
-            await setTokens(ctx, result.tokens);
-            refetchTokens();
-            queryClient.invalidateQueries({ queryKey: ["monzo_accounts"] });
-            setIsConnecting(false);
-          } else if (attempts >= maxAttempts) {
-            clearInterval(pollRef.current!);
-            pollRef.current = null;
-            setIsConnecting(false);
-            setConnectError("Authentication timed out. Please try again.");
-          }
-        } catch {
-          clearInterval(pollRef.current!);
-          pollRef.current = null;
-          setIsConnecting(false);
-          setConnectError("Failed to complete authentication. Please try again.");
-        }
-      }, 2000);
+      window.open(url, "monzo_auth", "width=500,height=600");
+
+      const tokens = await client.pollTokenStatus(state, 150, 2000);
+      if (!tokens) {
+        setError("Authentication timeout");
+        setAuthInProgress(false);
+        return;
+      }
+
+      await setTokens(tokens);
+
+      const accounts = await client.getAccounts(tokens.access_token);
+      setMonzoAccounts(accounts);
+
+      setError(null);
     } catch (err) {
-      setIsConnecting(false);
-      setConnectError((err as Error).message);
+      setError(
+        err instanceof Error ? err.message : "Authentication failed"
+      );
+    } finally {
+      setAuthInProgress(false);
     }
-  }
+  };
 
-  async function disconnect() {
-    await clearTokens(ctx);
-    refetchTokens();
-    queryClient.invalidateQueries({ queryKey: ["monzo_accounts"] });
-  }
+  const handleMappingChange = (monzoId: string, wealthfolioId: string) => {
+    const newMapping = { ...mapping, [monzoId]: wealthfolioId };
+    setMapping(newMapping);
+  };
 
-  useEffect(() => {
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, []);
-
-  const monzoAccounts = monzoAccountsData?.accounts ?? [];
+  const saveMapping = async () => {
+    setLoading(true);
+    try {
+      await setAccountMapping(mapping);
+      setError(null);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to save mapping"
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
-    <div className="space-y-6 p-6 max-w-2xl">
+    <div className="p-6 space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold">Monzo Sync Settings</h1>
-        <p className="text-muted-foreground mt-1">Configure your Monzo Bank connection.</p>
+        <h2 className="text-lg font-semibold mb-4">Proxy Configuration</h2>
+        <div className="space-y-2">
+          <Input
+            placeholder="http://localhost:8000"
+            value={proxyUrl}
+            onChange={(e) => setProxyUrl(e.target.value)}
+          />
+          <Button onClick={saveProxyUrl}>Save Proxy URL</Button>
+        </div>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Proxy Server</CardTitle>
-          <CardDescription>
-            The local FastAPI proxy that handles Monzo OAuth and API requests.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex gap-2">
-            <Input
-              value={proxyUrl}
-              onChange={(e) => setProxyUrl(e.target.value)}
-              placeholder="http://localhost:8000"
-              className="flex-1"
-            />
-            <Button onClick={saveProxyUrl} disabled={isSavingProxy || !proxyUrl.trim()}>
-              {isSavingProxy ? "Saving…" : "Save"}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Monzo Connection</CardTitle>
-          <CardDescription>Connect your Monzo account via OAuth.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {tokens ? (
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Badge variant="outline" className="text-green-600 border-green-600">
-                  Connected
-                </Badge>
-                <span className="text-sm text-muted-foreground">Monzo account linked</span>
-              </div>
-              <Button variant="outline" size="sm" onClick={disconnect}>
-                Disconnect
-              </Button>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <Button onClick={connectMonzo} disabled={isConnecting || !savedProxyUrl}>
-                {isConnecting ? "Waiting for authentication…" : "Connect Monzo"}
-              </Button>
-              {!savedProxyUrl && (
-                <p className="text-sm text-muted-foreground">Save a proxy URL above first.</p>
-              )}
-              {connectError && (
-                <p className="text-sm text-destructive">{connectError}</p>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      <div>
+        <h2 className="text-lg font-semibold mb-4">Authentication</h2>
+        <Button
+          onClick={handleConnect}
+          disabled={authInProgress}
+        >
+          {authInProgress ? "Authenticating..." : "Connect Monzo Account"}
+        </Button>
+      </div>
 
       {monzoAccounts.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Account Mapping</CardTitle>
-            <CardDescription>
-              Link each Monzo account to a Wealthfolio cash account.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {monzoAccounts.map((monzoAcc) => (
-              <div key={monzoAcc.id} className="flex items-center gap-3">
-                <Label className="w-44 shrink-0 text-sm truncate">{monzoAcc.description}</Label>
+        <div>
+          <h2 className="text-lg font-semibold mb-4">Account Mapping</h2>
+          <div className="space-y-4">
+            {monzoAccounts.map((monzoAccount) => (
+              <div key={monzoAccount.id} className="flex items-center gap-4">
+                <span className="flex-1">{monzoAccount.description}</span>
                 <Select
-                  value={mapping[monzoAcc.id] ?? ""}
-                  onValueChange={(val) =>
-                    setMapping((prev) => ({ ...prev, [monzoAcc.id]: val }))
+                  value={mapping[monzoAccount.id] || ""}
+                  onChange={(value) =>
+                    handleMappingChange(monzoAccount.id, value)
                   }
                 >
-                  <SelectTrigger className="flex-1">
-                    <SelectValue placeholder="Select Wealthfolio account" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {wfAccounts.map((wfAcc) => (
-                      <SelectItem key={wfAcc.id} value={wfAcc.id}>
-                        {wfAcc.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
+                  <option value="">Select Wealthfolio account...</option>
+                  {wealthfolioAccounts.map((account) => (
+                    <option key={account.id} value={account.id}>
+                      {account.name}
+                    </option>
+                  ))}
                 </Select>
               </div>
             ))}
-            <Separator />
-            <Button
-              onClick={() => saveMappingMutation.mutate(mapping)}
-              disabled={saveMappingMutation.isPending}
-            >
-              {saveMappingMutation.isPending ? "Saving…" : "Save Mapping"}
+            <Button onClick={saveMapping} disabled={loading}>
+              Save Mapping
             </Button>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
       )}
+
+      {error && <div className="text-red-600 text-sm">{error}</div>}
     </div>
   );
 }

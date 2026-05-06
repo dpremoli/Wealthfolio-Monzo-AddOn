@@ -1,59 +1,44 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { AddonContext, AddonEnableFunction } from "@wealthfolio/addon-sdk";
-import React from "react";
-import DashboardPage from "./pages/dashboard-page";
-import SettingsPage from "./pages/settings-page";
+import { AddonDefinition, useAddonContext } from "@wealthfolio/addon-sdk";
+import { DashboardPage } from "./pages/dashboard-page";
+import { SettingsPage } from "./pages/settings-page";
 
-const enable: AddonEnableFunction = (context) => {
-  context.api.logger.info("Monzo addon enabling");
+const queryClient = new QueryClient();
 
-  const addedItems: { remove: () => void }[] = [];
+function AddonContent() {
+  const { router } = useAddonContext();
 
-  try {
-    const sidebarItem = context.sidebar.addItem({
-      id: "monzo",
+  return (
+    <QueryClientProvider client={queryClient}>
+      {router.currentRoute === "/addons/monzo/settings" ? (
+        <SettingsPage />
+      ) : (
+        <DashboardPage />
+      )}
+    </QueryClientProvider>
+  );
+}
+
+export default {
+  enable: async (ctx) => {
+    ctx.ui.sidebar.addItem({
       label: "Monzo Sync",
-      icon: <span style={{ fontSize: "16px" }}>&#127974;</span>,
-      route: "/addons/monzo",
-      order: 160,
-    });
-    addedItems.push(sidebarItem);
-
-    const wrap = (Component: React.ComponentType<{ ctx: AddonContext }>) => () => {
-      const client = context.api.query.getClient() as QueryClient;
-      return (
-        <QueryClientProvider client={client}>
-          <Component ctx={context} />
-        </QueryClientProvider>
-      );
-    };
-
-    context.router.add({
+      icon: "bank",
       path: "/addons/monzo",
-      component: React.lazy(() => Promise.resolve({ default: wrap(DashboardPage) })),
     });
 
-    context.router.add({
+    ctx.router.add({
+      path: "/addons/monzo",
+      component: AddonContent,
+    });
+
+    ctx.router.add({
       path: "/addons/monzo/settings",
-      component: React.lazy(() => Promise.resolve({ default: wrap(SettingsPage) })),
+      component: AddonContent,
     });
+  },
 
-    context.api.logger.info("Monzo addon enabled");
-  } catch (error) {
-    context.api.logger.error("Failed to enable Monzo addon: " + (error as Error).message);
-    throw error;
-  }
-
-  context.onDisable(() => {
-    context.api.logger.info("Monzo addon disabling");
-    addedItems.forEach((item) => {
-      try {
-        item.remove();
-      } catch (err) {
-        context.api.logger.error("Error removing item: " + (err as Error).message);
-      }
-    });
-  });
-};
-
-export default enable;
+  onDisable: async () => {
+    // Cleanup if needed
+  },
+} satisfies AddonDefinition;

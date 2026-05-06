@@ -1,21 +1,17 @@
 import os
 import secrets
-from datetime import datetime, timedelta, timezone
-from typing import Optional
-
 import httpx
-from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from datetime import datetime, timedelta
+from typing import Optional
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(
-    title="Monzo Proxy",
-    description="Backend proxy for Monzo API OAuth and authenticated requests",
-)
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,153 +21,178 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MONZO_AUTH_BASE = "https://auth.monzo.com/"
-MONZO_TOKEN_URL = "https://api.monzo.com/oauth2/token"
-MONZO_API_BASE = "https://api.monzo.com"
-
-CLIENT_ID = os.getenv("MONZO_CLIENT_ID", "")
-CLIENT_SECRET = os.getenv("MONZO_CLIENT_SECRET", "")
+MONZO_CLIENT_ID = os.getenv("MONZO_CLIENT_ID")
+MONZO_CLIENT_SECRET = os.getenv("MONZO_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("REDIRECT_URI", "http://localhost:8000/callback")
+MONZO_AUTH_URL = "https://auth.monzo.com"
+MONZO_API_URL = "https://api.monzo.com"
 
-# Short-lived in-memory store keyed by state; cleared on first retrieval.
-# Tokens live here only until the addon polls and stores them in the OS keyring.
 pending_tokens: dict[str, dict] = {}
+auth_states: dict[str, str] = {}
 
 
-def _extract_bearer(request: Request) -> str:
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-    return auth[7:]
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    expires_in: int
+    token_type: str
+    user_id: str
 
 
-def _add_expires_at(token_data: dict) -> dict:
-    expires_in = token_data.get("expires_in", 21600)
-    token_data["expires_at"] = int(
-        (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).timestamp() * 1000
-    )
-    return token_data
+class AuthUrlResponse(BaseModel):
+    url: str
+    state: str
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-
-
-@app.get("/auth")
-async def get_auth_url():
-    state = secrets.token_urlsafe(32)
-    url = (
-        f"{MONZO_AUTH_BASE}"
-        f"?client_id={CLIENT_ID}"
-        f"&redirect_uri={REDIRECT_URI}"
-        f"&response_type=code"
-        f"&state={state}"
-    )
-    return {"url": url, "state": state}
-
-
-@app.get("/callback")
-async def oauth_callback(code: str, state: str):
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            MONZO_TOKEN_URL,
-            data={
-                "grant_type": "authorization_code",
-                "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
-                "redirect_uri": REDIRECT_URI,
-                "code": code,
-            },
-        )
-    if resp.status_code != 200:
-        raise HTTPException(status_code=400, detail=f"Token exchange failed: {resp.text}")
-
-    pending_tokens[state] = _add_expires_at(resp.json())
-
-    return HTMLResponse(
-        content=(
-            "<html><body style='font-family:sans-serif;text-align:center;padding:40px'>"
-            "<h2>&#10003; Authentication successful!</h2>"
-            "<p>You can close this window and return to Wealthfolio.</p>"
-            "</body></html>"
-        )
-    )
-
-
-@app.get("/token-status")
-async def token_status(state: str):
-    tokens = pending_tokens.pop(state, None)
-    if tokens is None:
-        return {"ready": False}
-    return {"ready": True, "tokens": tokens}
+class TokenStatusResponse(BaseModel):
+    ready: bool
+    tokens: Optional[TokenResponse] = None
 
 
 class RefreshRequest(BaseModel):
     refresh_token: str
 
 
-@app.post("/refresh")
-async def refresh_token(body: RefreshRequest):
+class TokenRefreshResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    expires_in: int
+    token_type: str
+
+
+@app.get("/auth", response_model=AuthUrlResponse)
+async def get_auth_url():
+    state = secrets.token_urlsafe(32)
+    auth_states[state] = state
+
+    auth_url = (
+        f"{MONZO_AUTH_URL}/"
+        f"?client_id={MONZO_CLIENT_ID}"
+        f"&redirect_uri={REDIRECT_URI}"
+        f"&response_type=code"
+        f"&state={state}"
+    )
+
+    return {"url": auth_url, "state": state}
+
+
+@app.get("/callback")
+async def callback(code: str = Query(...), state: str = Query(...)):
+    if state not in auth_states:
+        return HTMLResponse(
+            "<html><body><p>Invalid state parameter</p></body></html>",
+            status_code=400
+        )
+
     async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            MONZO_TOKEN_URL,
+        response = await client.post(
+            f"{MONZO_API_URL}/oauth/token",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": MONZO_CLIENT_ID,
+                "client_secret": MONZO_CLIENT_SECRET,
+                "redirect_uri": REDIRECT_URI,
+                "code": code,
+            }
+        )
+
+    if response.status_code != 200:
+        return HTMLResponse(
+            "<html><body><p>Failed to exchange authorization code</p></body></html>",
+            status_code=400
+        )
+
+    token_data = response.json()
+    expires_at = datetime.utcnow() + timedelta(seconds=token_data["expires_in"])
+
+    pending_tokens[state] = {
+        "access_token": token_data["access_token"],
+        "refresh_token": token_data["refresh_token"],
+        "expires_in": token_data["expires_in"],
+        "expires_at": expires_at.isoformat(),
+        "token_type": token_data.get("token_type", "Bearer"),
+        "user_id": token_data.get("user_id", ""),
+    }
+
+    del auth_states[state]
+
+    return HTMLResponse(
+        "<html><body><p>Authorization successful! You can close this window.</p></body></html>"
+    )
+
+
+@app.get("/token-status", response_model=TokenStatusResponse)
+async def get_token_status(state: str = Query(...)):
+    if state in pending_tokens:
+        tokens = pending_tokens.pop(state)
+        return {"ready": True, "tokens": tokens}
+
+    return {"ready": False, "tokens": None}
+
+
+@app.post("/refresh", response_model=TokenRefreshResponse)
+async def refresh_token(request: RefreshRequest):
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{MONZO_API_URL}/oauth/token",
             data={
                 "grant_type": "refresh_token",
-                "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
-                "refresh_token": body.refresh_token,
-            },
+                "client_id": MONZO_CLIENT_ID,
+                "client_secret": MONZO_CLIENT_SECRET,
+                "refresh_token": request.refresh_token,
+            }
         )
-    if resp.status_code != 200:
-        raise HTTPException(status_code=401, detail=f"Token refresh failed: {resp.text}")
-    return _add_expires_at(resp.json())
+
+    if response.status_code != 200:
+        return {"status": "error"}, 400
+
+    token_data = response.json()
+    return {
+        "access_token": token_data["access_token"],
+        "refresh_token": token_data["refresh_token"],
+        "expires_in": token_data["expires_in"],
+        "token_type": token_data.get("token_type", "Bearer"),
+    }
 
 
 @app.get("/accounts")
-async def get_accounts(request: Request, account_type: Optional[str] = None):
-    access_token = _extract_bearer(request)
-    params: dict = {}
-    if account_type:
-        params["account_type"] = account_type
-
+async def get_accounts(
+    authorization: str = Query(..., alias="Authorization"),
+    account_type: Optional[str] = Query(None),
+):
     async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"{MONZO_API_BASE}/accounts",
-            params=params,
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
+        headers = {"Authorization": authorization}
+        url = f"{MONZO_API_URL}/accounts"
+        if account_type:
+            url += f"?account_type={account_type}"
 
-    if resp.status_code == 401:
-        raise HTTPException(status_code=401, detail="Monzo token is invalid or expired")
-    if not resp.is_success:
-        raise HTTPException(status_code=resp.status_code, detail=resp.text)
-    return resp.json()
+        response = await client.get(url, headers=headers)
+
+    if response.status_code != 200:
+        return {"error": "Failed to fetch accounts"}, response.status_code
+
+    return response.json()
 
 
 @app.get("/transactions")
 async def get_transactions(
-    request: Request,
-    account_id: str,
-    since: Optional[str] = None,
-    before: Optional[str] = None,
+    authorization: str = Query(..., alias="Authorization"),
+    account_id: str = Query(...),
+    since: Optional[str] = Query(None),
 ):
-    access_token = _extract_bearer(request)
-    params: dict = {"account_id": account_id}
-    if since:
-        params["since"] = since
-    if before:
-        params["before"] = before
-
     async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"{MONZO_API_BASE}/transactions",
+        headers = {"Authorization": authorization}
+        params = {"account_id": account_id}
+        if since:
+            params["since"] = since
+
+        response = await client.get(
+            f"{MONZO_API_URL}/transactions",
+            headers=headers,
             params=params,
-            headers={"Authorization": f"Bearer {access_token}"},
         )
 
-    if resp.status_code == 401:
-        raise HTTPException(status_code=401, detail="Monzo token is invalid or expired")
-    if not resp.is_success:
-        raise HTTPException(status_code=resp.status_code, detail=resp.text)
-    return resp.json()
+    if response.status_code != 200:
+        return {"error": "Failed to fetch transactions"}, response.status_code
+
+    return response.json()

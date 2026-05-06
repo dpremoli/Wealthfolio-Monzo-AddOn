@@ -1,105 +1,118 @@
-import { useState } from "react";
-import type { AddonContext } from "@wealthfolio/addon-sdk";
-import type { AccountMapping, SyncResult } from "../types";
-import { MonzoProxyClient } from "../lib/proxy-client";
-import { isPending, isPotTransfer, mapTransactionToActivity } from "../lib/mapper";
-import { getTokens, isTokenExpired, setTokens } from "./use-tokens";
+import { useCallback } from "react";
+import { useAddonContext } from "@wealthfolio/addon-sdk";
+import { MonzoProxyClient } from "@/lib/proxy-client";
+import {
+  isPending,
+  isPotTransfer,
+  mapTransactionToActivity,
+} from "@/lib/mapper";
+import { AccountMapping, MonzoTokens, SyncResult } from "@/types";
+import { useTokens } from "./use-tokens";
 
-const PROXY_URL_KEY = "monzo_proxy_url";
-const MAPPING_KEY = "monzo_account_mapping";
 const LAST_SYNC_KEY = "monzo_last_sync";
+const ACCOUNT_MAPPING_KEY = "monzo_account_mapping";
 
-interface SyncState {
-  isSyncing: boolean;
-  lastSyncAt: string | null;
-  lastResult: SyncResult | null;
-  error: string | null;
-}
+export function useSync() {
+  const ctx = useAddonContext();
+  const { getTokens, setTokens, isTokenExpired } = useTokens();
 
-export function useSync(ctx: AddonContext) {
-  const [state, setState] = useState<SyncState>({
-    isSyncing: false,
-    lastSyncAt: null,
-    lastResult: null,
-    error: null,
-  });
-
-  async function sync() {
-    setState((s) => ({ ...s, isSyncing: true, error: null }));
+  const getLastSync = useCallback(async (): Promise<string | null> => {
     try {
-      const proxyUrl = await ctx.api.secrets.get(PROXY_URL_KEY);
-      if (!proxyUrl) throw new Error("Proxy URL not configured. Open Settings to set it up.");
+      return await ctx.api.secrets.get(LAST_SYNC_KEY);
+    } catch {
+      return null;
+    }
+  }, [ctx.api.secrets]);
 
-      const mappingRaw = await ctx.api.secrets.get(MAPPING_KEY);
-      if (!mappingRaw) throw new Error("No account mapping configured. Open Settings first.");
-      const mapping: AccountMapping = JSON.parse(mappingRaw);
+  const setLastSync = useCallback(
+    async (timestamp: string) => {
+      await ctx.api.secrets.set(LAST_SYNC_KEY, timestamp);
+    },
+    [ctx.api.secrets]
+  );
 
-      let tokens = await getTokens(ctx);
-      if (!tokens) throw new Error("Not connected to Monzo. Open Settings to connect.");
+  const getAccountMapping = useCallback(async (): Promise<AccountMapping> => {
+    try {
+      const mapping = await ctx.api.secrets.get(ACCOUNT_MAPPING_KEY);
+      return mapping ? JSON.parse(mapping) : {};
+    } catch {
+      return {};
+    }
+  }, [ctx.api.secrets]);
+
+  const setAccountMapping = useCallback(
+    async (mapping: AccountMapping) => {
+      await ctx.api.secrets.set(ACCOUNT_MAPPING_KEY, JSON.stringify(mapping));
+    },
+    [ctx.api.secrets]
+  );
+
+  const sync = useCallback(
+    async (proxyUrl: string): Promise<SyncResult> => {
+      const result: SyncResult = {
+        imported: 0,
+        skipped: 0,
+        duplicates: 0,
+      };
+
+      let tokens = await getTokens();
+      if (!tokens) throw new Error("Not authenticated");
+
+      if (isTokenExpired(tokens)) {
+        const refreshed = await new MonzoProxyClient(proxyUrl).refreshToken(
+          tokens.refresh_token
+        );
+        tokens = refreshed;
+        await setTokens(tokens);
+      }
+
+      const lastSync = await getLastSync();
+      const mapping = await getAccountMapping();
 
       const client = new MonzoProxyClient(proxyUrl);
 
-      if (isTokenExpired(tokens)) {
-        const refreshed = await client.refreshToken(tokens.refresh_token);
-        await setTokens(ctx, refreshed);
-        tokens = refreshed;
-      }
-
-      const lastSyncRaw = await ctx.api.secrets.get(LAST_SYNC_KEY);
-      const lastSync: string | undefined = lastSyncRaw
-        ? (JSON.parse(lastSyncRaw) as string)
-        : undefined;
-
-      let totalImported = 0;
-      let totalSkipped = 0;
-      let totalDuplicates = 0;
-
-      for (const [monzoAccountId, wealthfolioAccountId] of Object.entries(mapping)) {
-        const { transactions } = await client.getTransactions(
+      for (const [monzoId, wealthfolioId] of Object.entries(mapping)) {
+        const transactions = await client.getTransactions(
           tokens.access_token,
-          monzoAccountId,
-          lastSync,
+          monzoId,
+          lastSync
         );
 
-        const eligible = transactions.filter(
-          (tx) => !isPending(tx) && !isPotTransfer(tx),
+        const filtered = transactions.filter(
+          (tx) => !isPending(tx) && !isPotTransfer(tx)
         );
-        if (eligible.length === 0) continue;
 
-        const activities = eligible.map((tx) =>
-          mapTransactionToActivity(tx, wealthfolioAccountId),
-        );
+        const activities = filtered.map(mapTransactionToActivity);
 
         const checked = await ctx.api.activities.checkImport(activities);
-        const toImport = checked.filter((a) => !a.duplicateOfId);
+        const nonDuplicates = checked.filter(
+          (a) => !a.duplicateOfId
+        );
 
-        if (toImport.length > 0) {
-          const result = await ctx.api.activities.import(toImport);
-          totalImported += result.summary.imported;
-          totalSkipped += result.summary.skipped;
-          totalDuplicates += result.summary.duplicates;
-        } else {
-          totalDuplicates += checked.length;
+        if (nonDuplicates.length > 0) {
+          await ctx.api.activities.import(
+            nonDuplicates,
+            wealthfolioId
+          );
+          result.imported += nonDuplicates.length;
         }
+
+        result.duplicates += checked.length - nonDuplicates.length;
+        result.skipped += filtered.length - checked.length;
       }
 
-      const now = new Date().toISOString();
-      await ctx.api.secrets.set(LAST_SYNC_KEY, JSON.stringify(now));
+      await setLastSync(new Date().toISOString());
 
-      setState({
-        isSyncing: false,
-        lastSyncAt: now,
-        lastResult: { imported: totalImported, skipped: totalSkipped, duplicates: totalDuplicates },
-        error: null,
-      });
-    } catch (err) {
-      setState((s) => ({
-        ...s,
-        isSyncing: false,
-        error: (err as Error).message,
-      }));
-    }
-  }
+      return result;
+    },
+    [ctx.api.activities, getTokens, setTokens, isTokenExpired, getLastSync, setLastSync, getAccountMapping]
+  );
 
-  return { ...state, sync };
+  return {
+    sync,
+    getLastSync,
+    setLastSync,
+    getAccountMapping,
+    setAccountMapping,
+  };
 }

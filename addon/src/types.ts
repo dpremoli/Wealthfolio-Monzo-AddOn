@@ -1,7 +1,7 @@
 export interface MonzoTokens {
   access_token: string;
   refresh_token: string;
-  expires_at: number; // ms since epoch
+  expires_at: number;
   token_type: string;
   user_id: string;
 }
@@ -15,19 +15,22 @@ export interface MonzoAccount {
 export interface MonzoTransaction {
   id: string;
   created: string;
-  settled: string; // empty string if pending, ISO timestamp if settled
-  amount: number; // minor units (pence), negative = debit, positive = credit
+  settled: string;
+  amount: number;
   currency: string;
   description: string;
   notes: string;
   category: string;
   is_load: boolean;
-  metadata: Record<string, string>;
-  decline_reason?: string | null;
+  metadata: {
+    provider_category?: string;
+    [key: string]: any;
+  };
+  decline_reason?: string;
 }
 
 export interface AccountMapping {
-  [monzoAccountId: string]: string; // maps to wealthfolioAccountId
+  [monzoId: string]: string;
 }
 
 export interface SyncResult {

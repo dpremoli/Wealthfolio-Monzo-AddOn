@@ -1,0 +1,52 @@
+name: Release Addon
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version number (e.g., 1.0.0)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+
+      - name: Setup pnpm
+        run: npm install -g pnpm
+
+      - name: Install addon dependencies
+        working-directory: addon
+        run: pnpm install
+
+      - name: Build addon
+        working-directory: addon
+        run: pnpm build
+
+      - name: Create addon ZIP
+        working-directory: addon
+        run: pnpm package
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version || github.ref_name }}
+          name: Monzo Addon ${{ github.event.inputs.version || github.ref_name }}
+          files: addon/dist/monzo-addon-*.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
