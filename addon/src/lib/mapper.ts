@@ -25,7 +25,5 @@ export function mapTransactionToActivity(
     amount: Math.abs(tx.amount) / 100,
     currency: tx.currency,
     comment: tx.description || tx.notes || undefined,
-    isValid: true,
-    isDraft: false,
   };
 }
