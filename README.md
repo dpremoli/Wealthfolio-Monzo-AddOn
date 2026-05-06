@@ -57,6 +57,76 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 4. Map your Monzo accounts to Wealthfolio accounts
 5. Go to dashboard and click "Sync Now"
 
+---
+
+## Unraid Deployment
+
+### Step 1: Get Monzo API Credentials
+
+1. Go to https://developers.monzo.com
+2. Sign in with your Monzo account
+3. Click **"Create an app"** → name it `Wealthfolio`
+4. Select **Confidential (for server-to-server communication)**
+5. Set **Redirect URI** to `http://YOUR_UNRAID_IP:8000/callback`
+6. Copy your **Client ID** and **Client Secret**
+
+### Step 2: Deploy the Proxy Container
+
+**Via Unraid WebUI:**
+
+1. Go to **Docker** tab → **Add Container**
+2. Fill in **Name:** `monzo-proxy`, **Repository:** `python:3.11-slim`
+3. Under **Volumes**: Container Path `/app` → Host Path `/mnt/user/appdata/monzo-proxy`
+4. Under **Ports**: Container `8000` → Host `8000` (TCP)
+5. Under **Environment Variables**:
+   - `MONZO_CLIENT_ID` → your client ID
+   - `MONZO_CLIENT_SECRET` → your client secret
+   - `REDIRECT_URI` → `http://192.168.1.X:8000/callback` (your Unraid IP)
+   - `PORT` → `8000`
+6. Under **Post Arguments**:
+   ```
+   bash -c "pip install -r requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8000"
+   ```
+
+**Via CLI/SSH:**
+
+```bash
+cd /mnt/user/appdata
+git clone https://github.com/dpremoli/MonzoAddOn.git monzo-proxy
+cd monzo-proxy
+
+docker run -d \
+  --name monzo-proxy \
+  --restart unless-stopped \
+  -p 8000:8000 \
+  -e MONZO_CLIENT_ID="your_client_id" \
+  -e MONZO_CLIENT_SECRET="your_client_secret" \
+  -e REDIRECT_URI="http://192.168.1.X:8000/callback" \
+  -v /mnt/user/appdata/monzo-proxy:/app \
+  -w /app \
+  python:3.11-slim \
+  bash -c "pip install -r requirements.txt && uvicorn main:app --host 0.0.0.0 --port 8000"
+```
+
+**Test the proxy:**
+```bash
+curl http://192.168.1.X:8000/health
+# Should return: {"status":"ok"}
+```
+
+### Step 3: Build and Load the Addon
+
+```bash
+cd addon
+npm install
+npm run build
+npm run bundle   # Creates dist/monzo-addon-1.0.0.zip
+```
+
+In Wealthfolio: Settings → Addons → Install from ZIP → upload the generated ZIP.
+
+---
+
 ## Architecture
 
 ### Proxy (Python FastAPI)
@@ -115,6 +185,8 @@ For each mapped account:
 Update last_sync timestamp
 ```
 
+---
+
 ## Configuration
 
 ### Proxy Environment Variables
@@ -132,41 +204,23 @@ PORT=8000
 2. **Monzo Authentication**: One-click OAuth via browser
 3. **Account Mapping**: Link each Monzo account to Wealthfolio account
 
+---
+
 ## API Reference
 
 ### Proxy Endpoints
 
-All endpoints handle CORS (allow all origins for browser addon).
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/health` | Health check |
+| GET | `/auth` | Get Monzo OAuth URL + state token |
+| GET | `/callback?code=X&state=Y` | OAuth callback (Monzo redirects here) |
+| GET | `/token-status?state=X` | Poll for tokens after OAuth |
+| POST | `/refresh` | Refresh expired access token |
+| GET | `/accounts?account_type=uk_retail` | List user's Monzo accounts |
+| GET | `/transactions?account_id=X&since=Y` | List transactions for account |
 
-**GET /auth**
-- Returns: `{url: string, state: string}`
-- Purpose: Get Monzo OAuth URL and state token
-
-**GET /callback?code=X&state=Y**
-- Purpose: OAuth callback (called by Monzo after user approves)
-- Returns: HTML confirmation page
-- Side effect: Stores tokens in `pending_tokens[state]`
-
-**GET /token-status?state=X**
-- Returns: `{ready: bool, tokens?: {...}}`
-- Purpose: Poll for tokens after OAuth
-- Side effect: Pops from pending_tokens on success
-
-**POST /refresh**
-- Body: `{refresh_token: string}`
-- Returns: `{access_token, refresh_token, expires_in, token_type}`
-- Purpose: Refresh expired access token
-- Note: Monzo returns new refresh_token (single-use)
-
-**GET /accounts?account_type=uk_retail**
-- Query: Authorization header (addon passes as query param)
-- Returns: `{accounts: MonzoAccount[]}`
-- Purpose: List user's accounts
-
-**GET /transactions?account_id=X&since=Y**
-- Query: Authorization header, account_id, since (optional ISO date)
-- Returns: `{transactions: MonzoTransaction[]}`
-- Purpose: Fetch transactions with optional incremental sync
+---
 
 ## Data Privacy & Security
 
@@ -175,6 +229,8 @@ All endpoints handle CORS (allow all origins for browser addon).
 - **Proxy is stateless**: Tokens not persisted (in-memory only)
 - **HTTPS in production**: Configure redirect URI and proxy with TLS
 - **No third-party**: All data stays between your machine, Monzo, and Wealthfolio
+
+---
 
 ## Docker Deployment
 
@@ -213,6 +269,8 @@ services:
     restart: unless-stopped
 ```
 
+---
+
 ## Development
 
 ### Install Dependencies
@@ -249,6 +307,8 @@ pnpm build        # Creates dist/addon.js
 pnpm package      # Creates dist/monzo-addon-1.0.0.zip
 ```
 
+---
+
 ## Troubleshooting
 
 ### Proxy won't start
@@ -262,21 +322,40 @@ pip install -r requirements.txt
 
 # Check port 8000 is available
 lsof -i :8000
+
+# Check Docker logs
+docker logs monzo-proxy
 ```
+
+### Addon can't reach proxy
+
+**Test connectivity:**
+```bash
+curl http://YOUR_PROXY_IP:8000/health
+# Should return: {"status":"ok"}
+```
+
+**If using bridge network:**
+- Use the proxy's container IP (e.g., `http://172.17.0.5:8000`)
+- Or use `--network host` when creating proxy container
 
 ### "Proxy URL not configured" in Wealthfolio
 
 1. Go to Settings page in addon
 2. Enter proxy URL (e.g., `http://localhost:8000`)
 3. Click "Save Proxy URL"
-4. Go back to main dashboard
 
 ### Authentication fails
 
 - Check proxy is running: `curl http://localhost:8000/auth`
 - Verify Client ID and Secret are correct
-- Check .env file: `cat .env` (never commit this!)
+- Check `REDIRECT_URI` matches your host IP (not `172.x.x.x` internal IP)
 - Check proxy logs for OAuth errors
+
+### OAuth callback fails
+
+- Ensure `REDIRECT_URI` in proxy matches your Monzo app credentials exactly
+- Use your Unraid/host IP, not a Docker internal IP or `localhost`
 
 ### Transactions not syncing
 
@@ -287,16 +366,65 @@ lsof -i :8000
 
 ### Duplicate transactions
 
-- Normal on first sync (checkImport dedupes)
-- Run sync again if duplicates appear
-- Each transaction has unique Monzo ID (idempotencyKey)
+- Normal on first sync (`checkImport` dedupes automatically)
+- Each transaction has a unique Monzo ID used as idempotency key
+
+---
+
+## FAQ
+
+**Q: Can I run this on the same container as Wealthfolio?**
+A: Not easily. The proxy needs Python; Wealthfolio is a Node.js/Tauri app. Separate containers are cleaner.
+
+**Q: What if my Unraid IP changes?**
+A: The proxy container still works. Just update the proxy URL in Wealthfolio addon settings.
+
+**Q: How often should I sync?**
+A: Manually whenever you want, or set up a cron job calling the proxy's `/transactions` endpoint.
+
+**Q: Will pending transactions import?**
+A: No. The addon filters them out (only syncs settled transactions).
+
+**Q: Can multiple Monzo accounts map to the same Wealthfolio account?**
+A: Yes. Transactions from each Monzo account will merge into the same Wealthfolio account.
+
+---
+
+## Project Structure
+
+```
+/
+├── main.py                    # FastAPI proxy
+├── requirements.txt           # Python deps
+├── .env.example               # Template
+├── README.md                  # This file
+└── addon/                     # TypeScript addon
+    ├── manifest.json
+    ├── package.json
+    ├── vite.config.ts
+    ├── tsconfig.json
+    ├── src/
+    │   ├── addon.tsx          # Entry point
+    │   ├── types.ts
+    │   ├── lib/
+    │   │   ├── proxy-client.ts
+    │   │   └── mapper.ts
+    │   ├── hooks/
+    │   │   ├── use-tokens.ts
+    │   │   └── use-sync.ts
+    │   └── pages/
+    │       ├── settings-page.tsx
+    │       └── dashboard-page.tsx
+```
+
+---
 
 ## Performance
 
 - **Sync time**: ~1s per 100 transactions
 - **Token refresh**: Automatic when < 5 min to expiry
 - **Rate limits**: Monzo allows 10 requests/sec per account
-- **Memory**: Proxy uses ~50MB (in-memory pending_tokens dict cleared after 5 min timeout)
+- **Memory**: Proxy uses ~50MB (pending_tokens dict cleared after 5 min timeout)
 
 ## Future Enhancements
 
@@ -304,7 +432,6 @@ lsof -i :8000
 - [ ] Pot transfers categorization
 - [ ] Multi-currency support
 - [ ] Split transactions
-- [ ] Decline reason logging
 
 ## License
 
@@ -312,7 +439,6 @@ MIT
 
 ## Support
 
-- Check `addon/README.md` for addon-specific troubleshooting
 - Monzo API docs: https://docs.monzo.com/
 - Wealthfolio addon SDK: https://github.com/afadil/wealthfolio
 
