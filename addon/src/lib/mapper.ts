@@ -29,6 +29,7 @@ export function mapTransactionToActivity(
     activityType: tx.amount >= 0 ? DEPOSIT : WITHDRAWAL,
     date: dateString,
     amount: Math.round(amountInPounds * 100) / 100, // Round to 2 decimals
+    symbol: tx.currency || "GBP", // Currency symbol is required
   };
   
   // Add optional fields only if they exist
@@ -37,8 +38,6 @@ export function mapTransactionToActivity(
   } else if (tx.notes) {
     activity.comment = tx.notes;
   }
-  
-  console.log("Mapped activity:", activity, "from transaction:", tx);
   
   return activity;
 }
