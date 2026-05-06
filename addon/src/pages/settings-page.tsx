@@ -28,6 +28,7 @@ import type { AccountMapping, MonzoAccount } from "../types";
 
 const PROXY_URL_KEY = "monzo_proxy_url";
 const MAPPING_KEY = "monzo_account_mapping";
+const LAST_SYNC_KEY = "monzo_last_sync";
 
 function monzoAccountName(acc: MonzoAccount): string {
   if (acc.account_number) return `Monzo (${acc.account_number})`;
@@ -41,6 +42,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
   const [autoCreateStatus, setAutoCreateStatus] = useState<string | null>(null);
+  const [resetStatus, setResetStatus] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoCreateRanRef = useRef(false);
 
@@ -206,6 +208,12 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
     queryClient.invalidateQueries({ queryKey: ["monzo_accounts"] });
   }
 
+  async function resetSyncHistory() {
+    await ctx.api.secrets.delete(LAST_SYNC_KEY);
+    queryClient.invalidateQueries({ queryKey: ["monzo_last_sync"] });
+    setResetStatus("Sync history cleared. Next sync will re-import all 90 days of transactions.");
+  }
+
   useEffect(() => {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
@@ -324,6 +332,29 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
           </CardContent>
         </Card>
       )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Advanced</CardTitle>
+          <CardDescription>Sync management and troubleshooting.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">Reset Sync History</p>
+              <p className="text-xs text-muted-foreground">
+                Forces the next sync to re-import all 90 days of transactions.
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={resetSyncHistory}>
+              Reset
+            </Button>
+          </div>
+          {resetStatus && (
+            <p className="text-sm text-green-600">{resetStatus}</p>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
