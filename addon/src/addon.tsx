@@ -4,6 +4,15 @@ import React from "react";
 import DashboardPage from "./pages/dashboard-page";
 import SettingsPage from "./pages/settings-page";
 
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 1000 * 60 * 5, // 5 minutes
+      gcTime: 1000 * 60 * 10, // 10 minutes
+    },
+  },
+});
+
 const enable: AddonEnableFunction = (context) => {
   context.api.logger.info("Monzo addon enabling");
 
@@ -19,14 +28,11 @@ const enable: AddonEnableFunction = (context) => {
     });
     addedItems.push(sidebarItem);
 
-    const wrap = (Component: React.ComponentType<{ ctx: AddonContext }>) => () => {
-      const client = context.api.query.getClient() as QueryClient;
-      return (
-        <QueryClientProvider client={client}>
-          <Component ctx={context} />
-        </QueryClientProvider>
-      );
-    };
+    const wrap = (Component: React.ComponentType<{ ctx: AddonContext }>) => () => (
+      <QueryClientProvider client={queryClient}>
+        <Component ctx={context} />
+      </QueryClientProvider>
+    );
 
     context.router.add({
       path: "/addons/monzo",
