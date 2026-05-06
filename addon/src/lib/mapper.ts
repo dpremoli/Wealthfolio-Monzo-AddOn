@@ -29,7 +29,7 @@ export function mapTransactionToActivity(
     activityType: tx.amount >= 0 ? DEPOSIT : WITHDRAWAL,
     date: dateString,
     amount: Math.round(amountInPounds * 100) / 100, // Round to 2 decimals
-    symbol: tx.currency || "GBP", // Currency symbol is required
+    currency: tx.currency || "GBP", // Currency code is required
   };
   
   // Add optional fields only if they exist
