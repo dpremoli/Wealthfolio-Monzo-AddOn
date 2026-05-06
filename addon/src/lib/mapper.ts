@@ -38,5 +38,7 @@ export function mapTransactionToActivity(
     activity.comment = tx.notes;
   }
   
+  console.log("Mapped activity:", activity, "from transaction:", tx);
+  
   return activity;
 }
