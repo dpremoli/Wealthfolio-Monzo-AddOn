@@ -54,6 +54,19 @@ def _add_expires_at(token_data: dict) -> dict:
     return token_data
 
 
+def _html_page(title: str, message: str, success: bool = True) -> HTMLResponse:
+    color = "#16a34a" if success else "#dc2626"
+    icon = "&#10003;" if success else "&#10007;"
+    return HTMLResponse(
+        content=(
+            f"<html><body style='font-family:sans-serif;text-align:center;padding:40px'>"
+            f"<h2 style='color:{color}'>{icon} {title}</h2>"
+            f"<p>{message}</p>"
+            f"</body></html>"
+        )
+    )
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -73,7 +86,18 @@ async def get_auth_url():
 
 
 @app.get("/callback")
-async def oauth_callback(code: str, state: str):
+async def oauth_callback(
+    request: Request,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    error_description: Optional[str] = None,
+):
+    # Monzo sends ?error=... when auth fails or is denied
+    if error or not code or not state:
+        reason = error_description or error or "Authentication was cancelled or failed."
+        return _html_page("Authentication Failed", reason, success=False)
+
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             MONZO_TOKEN_URL,
@@ -86,17 +110,17 @@ async def oauth_callback(code: str, state: str):
             },
         )
     if resp.status_code != 200:
-        raise HTTPException(status_code=400, detail=f"Token exchange failed: {resp.text}")
+        return _html_page(
+            "Authentication Failed",
+            f"Token exchange failed: {resp.text}",
+            success=False,
+        )
 
     pending_tokens[state] = _add_expires_at(resp.json())
 
-    return HTMLResponse(
-        content=(
-            "<html><body style='font-family:sans-serif;text-align:center;padding:40px'>"
-            "<h2>&#10003; Authentication successful!</h2>"
-            "<p>You can close this window and return to Wealthfolio.</p>"
-            "</body></html>"
-        )
+    return _html_page(
+        "Authentication successful!",
+        "You can close this window and return to Wealthfolio.",
     )
 
 
