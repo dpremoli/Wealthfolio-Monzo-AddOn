@@ -16,28 +16,20 @@ export function mapTransactionToActivity(
   tx: MonzoTransaction,
   wealthfolioAccountId: string,
 ): ActivityImport {
-  // Convert Monzo amount from pence (minor units) to decimal
-  const amountInPounds = Math.abs(tx.amount) / 100;
-  
-  // Parse the date - Monzo returns ISO string
-  const dateObj = new Date(tx.created);
-  const dateString = dateObj.toISOString().split('T')[0]; // YYYY-MM-DD format
-  
-  const activity: ActivityImport = {
+  const amountInMajorUnits = Math.abs(tx.amount) / 100;
+  const dateString = new Date(tx.created).toISOString().split("T")[0]; // YYYY-MM-DD
+  const currency = tx.currency || "GBP";
+
+  return {
     id: tx.id,
     accountId: wealthfolioAccountId,
     activityType: tx.amount >= 0 ? DEPOSIT : WITHDRAWAL,
     date: dateString,
-    amount: Math.round(amountInPounds * 100) / 100, // Round to 2 decimals
-    currency: tx.currency || "GBP", // Currency code is required
+    amount: Math.round(amountInMajorUnits * 100) / 100,
+    currency,
+    symbol: currency, // required by the API; use currency code for cash transactions
+    isValid: true,    // required
+    isDraft: false,   // required
+    comment: tx.description || tx.notes || undefined,
   };
-  
-  // Add optional fields only if they exist
-  if (tx.description) {
-    activity.comment = tx.description;
-  } else if (tx.notes) {
-    activity.comment = tx.notes;
-  }
-  
-  return activity;
 }
