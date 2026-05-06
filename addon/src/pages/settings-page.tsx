@@ -24,10 +24,15 @@ import {
 import React, { useEffect, useRef, useState } from "react";
 import { clearTokens, getTokens, setTokens } from "../hooks/use-tokens";
 import { MonzoProxyClient } from "../lib/proxy-client";
-import type { AccountMapping } from "../types";
+import type { AccountMapping, MonzoAccount } from "../types";
 
 const PROXY_URL_KEY = "monzo_proxy_url";
 const MAPPING_KEY = "monzo_account_mapping";
+
+function monzoAccountName(acc: MonzoAccount): string {
+  if (acc.account_number) return `Monzo (${acc.account_number})`;
+  return `Monzo ${acc.description}`;
+}
 
 export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
   const queryClient = useQueryClient();
@@ -35,7 +40,9 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
   const [isSavingProxy, setIsSavingProxy] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [autoCreateStatus, setAutoCreateStatus] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoCreateRanRef = useRef(false);
 
   const { data: savedProxyUrl } = useQuery({
     queryKey: ["monzo_proxy_url"],
@@ -82,6 +89,59 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
     if (savedMapping) setMapping(savedMapping);
   }, [savedMapping]);
 
+  // Auto-create Wealthfolio accounts for Monzo accounts that have no mapping
+  useEffect(() => {
+    if (autoCreateRanRef.current) return;
+    if (!monzoAccountsData?.accounts?.length || !wfAccounts || !savedMapping) return;
+
+    const unmapped = monzoAccountsData.accounts.filter(
+      (acc) => !savedMapping[acc.id],
+    );
+    if (unmapped.length === 0) return;
+
+    autoCreateRanRef.current = true;
+
+    (async () => {
+      const newMapping: AccountMapping = { ...savedMapping };
+      const created: string[] = [];
+
+      for (const acc of unmapped) {
+        const name = monzoAccountName(acc);
+        const currency = acc.currency || "GBP";
+
+        // Reuse existing account if name already matches
+        const existing = wfAccounts.find((a) => a.name === name);
+        if (existing) {
+          newMapping[acc.id] = existing.id;
+          continue;
+        }
+
+        try {
+          const newAcc = await ctx.api.accounts.create({
+            name,
+            account_type: "CASH",
+            currency,
+            is_default: false,
+            is_active: true,
+            tracking_mode: "TRANSACTIONS",
+          });
+          newMapping[acc.id] = newAcc.id;
+          created.push(name);
+        } catch (err) {
+          ctx.api.logger.error(`Failed to create account ${name}: ${(err as Error).message}`);
+        }
+      }
+
+      if (created.length > 0) {
+        await ctx.api.secrets.set(MAPPING_KEY, JSON.stringify(newMapping));
+        setMapping(newMapping);
+        queryClient.invalidateQueries({ queryKey: ["monzo_mapping"] });
+        queryClient.invalidateQueries({ queryKey: ["wf_accounts"] });
+        setAutoCreateStatus(`Auto-created: ${created.join(", ")}`);
+      }
+    })();
+  }, [monzoAccountsData, wfAccounts, savedMapping]);
+
   const saveMappingMutation = useMutation({
     mutationFn: (m: AccountMapping) =>
       ctx.api.secrets.set(MAPPING_KEY, JSON.stringify(m)),
@@ -108,7 +168,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
       window.open(url, "_blank", "width=600,height=700");
 
       let attempts = 0;
-      const maxAttempts = 150; // ~5 minutes at 2s intervals
+      const maxAttempts = 150;
       pollRef.current = setInterval(async () => {
         attempts++;
         try {
@@ -141,6 +201,7 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
 
   async function disconnect() {
     await clearTokens(ctx);
+    autoCreateRanRef.current = false;
     refetchTokens();
     queryClient.invalidateQueries({ queryKey: ["monzo_accounts"] });
   }
@@ -222,12 +283,18 @@ export default function SettingsPage({ ctx }: { ctx: AddonContext }) {
             <CardTitle>Account Mapping</CardTitle>
             <CardDescription>
               Link each Monzo account to a Wealthfolio cash account.
+              New accounts are created automatically.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {autoCreateStatus && (
+              <p className="text-sm text-green-600">{autoCreateStatus}</p>
+            )}
             {monzoAccounts.map((monzoAcc) => (
               <div key={monzoAcc.id} className="flex items-center gap-3">
-                <Label className="w-44 shrink-0 text-sm truncate">{monzoAcc.description}</Label>
+                <Label className="w-44 shrink-0 text-sm truncate">
+                  {monzoAccountName(monzoAcc)}
+                </Label>
                 <Select
                   value={mapping[monzoAcc.id] ?? ""}
                   onValueChange={(val) =>
