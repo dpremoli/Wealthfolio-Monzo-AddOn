@@ -85,7 +85,8 @@ export function useSync(ctx: AddonContext) {
           (tx) =>
             (isFlex || !isPending(tx)) &&
             !isPotTransfer(tx) &&
-            !isFlexRepayment(tx),
+            !isFlexRepayment(tx) &&
+            tx.category !== "savings",
         );
         if (eligible.length === 0) continue;
 
